@@ -1,0 +1,130 @@
+#!/usr/bin/env perl
+use 5.14.0;
+use utf8;
+use warnings;
+
+package Symlink::Maker {
+    use File::Find 'find';
+    use File::Path 'make_path';
+    use File::Basename qw(dirname basename);
+    use File::Spec;
+    sub new {
+        my ($class, %option) = @_;
+        bless \%option, $class;
+    }
+    sub from { @{ shift->{from} } }
+    sub to   { shift->{to}   }
+    sub trace {
+        my ($self, $message) = @_;
+        return unless $ENV{TRACE};
+        chomp $message;
+        warn "[TRACE] $message\n";
+    }
+
+    sub make {
+        my $self = shift;
+        my @files;
+        for my $from ($self->from) {
+            find sub {
+                return unless -f && -s; # XXX
+                my ($relative_path) = $File::Find::name =~ m{^$from/(.+)};
+                push @files, {
+                    absolute_path => $File::Find::name,
+                    relative_path => $relative_path,
+                };
+            }, $from;
+        }
+
+        my $to = $self->to;
+        make_path $to unless -d $to;
+        for my $file (@files) {
+            my $dir = dirname $file->{relative_path};
+            if ($dir ne ".") {
+                my $to_dir = File::Spec->catdir($to, $dir);
+                make_path $to_dir unless -d $to_dir;
+            }
+            symlink $file->{absolute_path}, File::Spec->catfile($to, $file->{relative_path});
+            $self->trace("symlink $file->{relative_path}");
+        }
+    }
+}
+
+package CLI {
+    use Carmel::App;
+    use File::Spec;
+    use File::Path 'remove_tree';
+    use Pod::Usage 'pod2usage';
+    sub new { bless {}, shift }
+    sub run {
+        my $self = shift;
+        my $cmd = shift || "help";
+        if (my $can = $self->can("cmd_$cmd")) {
+            $self->$can(@_);
+        } else {
+            $self->cmd_help;
+        }
+    }
+    sub symlinklib { "symlinklib" }
+    sub symlinklib_path { File::Spec->rel2abs( shift->symlinklib . "/bin" ) }
+    sub symlinklib_lib  { File::Spec->rel2abs( shift->symlinklib . "/lib" )  }
+    sub cmd_exec {
+        my $self = shift;
+        $self->cmd_symlink; # XXX need for first time only, but...
+        $ENV{PATH} = $self->symlinklib_path . ":$ENV{PATH}";
+        $ENV{PERL5LIB} = $self->symlinklib_lib;
+        exec @_;
+        exit 255;
+    }
+    sub cmd_symlink {
+        my $self = shift;
+        my $carmel = Carmel::App->new;
+        my @artifacts = $carmel->resolve;
+        my $symlinklib = $self->symlinklib;
+        remove_tree $symlinklib if -d $symlinklib; # XXX make sensu?
+
+        for my $artifact (@artifacts) {
+            my $lib_maker = Symlink::Maker->new(
+                from => [ grep -d, $artifact->libs ],
+                to   => "$symlinklib/lib",
+            );
+            $lib_maker->make;
+
+            my $bin_maker = Symlink::Maker->new(
+                from => [ grep -d, $artifact->paths ],
+                to   => "$symlinklib/bin",
+            );
+            $bin_maker->make;
+        }
+    }
+    sub cmd_help {
+        pod2usage(1);
+    }
+}
+
+CLI->run(@ARGV);
+
+__END__
+
+=head1 NAME
+
+What happens if we manage cpan modules by symlinks?
+
+=head1 SYNOPSIS
+
+    > carmel install Plack@1.0030
+    > cat "requires 'Plack', '== 1.0030';" > cpanfile
+
+    > what-happens exec perl -MPlack -e 'printf "Plack %s in %s\n", Plack->VERSION, $INC{"Plack.pm"}'
+    Plack 1.0030 in /Users/skaji/symlinklib/lib/Plack.pm
+
+=head1 DESCRIPTION
+
+This is just a proof of concept: What happens if we manage cpan modules by symlinks?
+
+See L<Carmel|https://github.com/miyagawa/Carmel>.
+
+=head1 AUTHOR
+
+Shoichi Kaji
+
+=cut
